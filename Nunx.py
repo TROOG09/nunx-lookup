@@ -1,244 +1,236 @@
 #!/usr/bin/env python3
+# nunx lookup ULTRA FINAL
 
-import socket
-import requests
+import asyncio, aiohttp, socket, json, re
+from colorama import Fore, Style, init
+from bs4 import BeautifulSoup
 import dns.resolver
-import sys
-import json
+import whois
 
-BANNER = """
-========================================
-        NUNX LOOKUP PRO
-   creators: thesixclown / lapsus group
-========================================
-"""
+init(autoreset=True)
 
-# -------------------- GEO + ASN --------------------
-def geolocation(ip):
-    print("\n[+] Geolocalización / ASN:")
+# -------------------- UI --------------------
+def print_section(title):
+    print(Fore.CYAN + f"\n[+] {title}")
+
+def panel(domain, ip):
+    print(Fore.GREEN + f"\nTARGET: {domain} ({ip})\n")
+
+# -------------------- RESOLVE --------------------
+async def resolve(domain):
+    loop = asyncio.get_event_loop()
+    try:
+        ip = await loop.run_in_executor(None, socket.gethostbyname, domain)
+        return ip
+    except:
+        return None
+
+# -------------------- IP INTEL --------------------
+async def ip_intel(session, ip):
+    print_section("IP INTEL")
+
+    result = {}
 
     try:
-        url = f"http://ip-api.com/json/{ip}"
-        data = requests.get(url, timeout=5).json()
+        async with session.get(f"http://ip-api.com/json/{ip}") as r:
+            data = await r.json()
+            result.update(data)
 
-        info = {
-            "Pais": data.get("country"),
-            "Region": data.get("regionName"),
-            "Ciudad": data.get("city"),
-            "ISP": data.get("isp"),
-            "ASN": data.get("as"),
-            "Proxy/VPN": data.get("proxy"),
-            "Hosting": data.get("hosting"),
-            "Lat": data.get("lat"),
-            "Lon": data.get("lon")
-        }
+            print(f"ASN: {data.get('as')}")
+            print(f"ISP: {data.get('isp')}")
+            print(f"ORG: {data.get('org')}")
+            print(f"Pais: {data.get('country')}")
+            print(f"Ciudad: {data.get('city')}")
 
-        for k, v in info.items():
-            print(f"{k}: {v}")
+            lat, lon = data.get("lat"), data.get("lon")
+            if lat and lon:
+                print(Fore.GREEN + f"MAP: https://www.google.com/maps?q={lat},{lon}")
 
-        return info
+            if data.get("proxy"):
+                print(Fore.YELLOW + "[!] VPN/PROXY")
+
+            if data.get("hosting"):
+                print(Fore.YELLOW + "[!] HOSTING")
 
     except:
-        print("[-] Error GEO")
-        return {}
+        print("Error IP intel")
+
+    try:
+        host = socket.gethostbyaddr(ip)[0]
+        print("Reverse:", host)
+        result["reverse"] = host
+    except:
+        pass
+
+    return result
 
 # -------------------- DNS --------------------
-def dns_lookup(domain):
-    print("\n[+] DNS Records:")
-    records_data = {}
-
-    for record in ["A", "MX", "NS", "TXT"]:
+async def dns_full(domain):
+    print_section("DNS")
+    for r in ["A","AAAA","MX","NS","TXT","CNAME"]:
         try:
-            answers = dns.resolver.resolve(domain, record)
-            records_data[record] = [str(r) for r in answers]
-
-            for r in answers:
-                print(f"{record}: {r}")
-
+            answers = dns.resolver.resolve(domain, r)
+            for a in answers:
+                print(f"{r}: {a}")
         except:
             pass
 
-    return records_data
-
-# -------------------- SUBDOMAINS --------------------
-def subdomain_lookup(domain):
-    print(f"\n[+] Subdominios (crt.sh):")
-
-    subdomains = set()
-
+# -------------------- WHOIS --------------------
+def whois_lookup(domain):
+    print_section("WHOIS")
     try:
-        url = f"https://crt.sh/?q=%25.{domain}&output=json"
-        data = requests.get(url, timeout=10).json()
-
-        for entry in data:
-            if "name_value" in entry:
-                for sub in entry["name_value"].split("\n"):
-                    sub = sub.strip()
-                    if sub:
-                        subdomains.add(sub)
-
-        for sub in sorted(subdomains):
-            try:
-                ip = socket.gethostbyname(sub)
-                print(f"{sub} --> {ip}")
-            except:
-                print(sub)
-
+        w = whois.whois(domain)
+        print(f"Registrar: {w.registrar}")
+        print(f"Creado: {w.creation_date}")
+        print(f"Expira: {w.expiration_date}")
     except:
-        print("[-] Error crt.sh")
+        print("Error whois")
 
-    return list(subdomains)
+# -------------------- HEADERS --------------------
+async def headers(session, domain):
+    print_section("HEADERS")
+    try:
+        async with session.get(f"http://{domain}") as r:
+            for k,v in r.headers.items():
+                print(f"{k}: {v}")
+    except:
+        pass
 
 # -------------------- PORT SCAN --------------------
-def port_scan(ip):
-    print("\n[+] Escaneo de puertos:")
+async def scan_port(ip, port):
+    try:
+        r, w = await asyncio.open_connection(ip, port)
+        w.close()
+        return port
+    except:
+        return None
 
-    open_ports = []
-    ports = [21, 22, 23, 25, 53, 80, 110, 139, 143, 443, 445, 3389]
-
-    for port in ports:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(0.5)
-
-        result = sock.connect_ex((ip, port))
-        if result == 0:
-            print(f"[OPEN] {port}")
-            open_ports.append(port)
-
-        sock.close()
-
+async def port_scan(ip):
+    print_section("PORTS")
+    ports = [21,22,25,53,80,110,139,143,443,445,3389]
+    results = await asyncio.gather(*[scan_port(ip,p) for p in ports])
+    open_ports = [p for p in results if p]
+    for p in open_ports:
+        print(Fore.RED + f"[OPEN] {p}")
     return open_ports
 
-# -------------------- REVERSE DNS --------------------
-def reverse_dns(ip):
-    print("\n[+] Reverse DNS:")
+# -------------------- CRT.SH --------------------
+async def crtsh(session, domain):
+    print_section("SUBDOMAINS")
     try:
-        host = socket.gethostbyaddr(ip)
-        print(host[0])
-        return host[0]
+        async with session.get(f"https://crt.sh/?q=%25.{domain}&output=json") as r:
+            text = await r.text()
+            text = text.replace("}{","},{")
+            data = json.loads(f"[{text}]")
+            subs = set()
+            for e in data:
+                for s in e.get("name_value","").split("\n"):
+                    if s and "*" not in s:
+                        subs.add(s.strip())
+            for s in list(subs)[:20]:
+                print(s)
+            return list(subs)
     except:
-        print("No disponible")
-        return None
+        return []
 
-# -------------------- DETECCIÓN --------------------
-def detect_tech(domain):
-    print("\n[+] Detección de tecnologías / seguridad:")
+# -------------------- EMAILS --------------------
+async def emails(session, domain):
+    print_section("EMAILS")
+    subs = await crtsh(session, domain)
+    found = set()
+    for s in subs:
+        if "@" in s:
+            found.add(s)
+    for e in found:
+        print(Fore.MAGENTA + e)
+    return list(found)
 
+# -------------------- SCRAPER --------------------
+async def scraper(session, domain):
+    print_section("SCRAPING")
     try:
-        url = f"http://{domain}"
-        response = requests.get(url, timeout=5)
+        async with session.get(f"http://{domain}") as r:
+            html = await r.text()
+            soup = BeautifulSoup(html,"html.parser")
 
-        headers = response.headers
+            if soup.title:
+                print("Title:", soup.title.string)
 
-        tech = {
-            "Server": headers.get("Server"),
-            "Powered-By": headers.get("X-Powered-By"),
-            "Via": headers.get("Via")
-        }
-
-        for k, v in tech.items():
-            if v:
-                print(f"{k}: {v}")
-
-        # Detectar protecciones
-        headers_str = str(headers).lower()
-
-        if "cloudflare" in headers_str:
-            print("[+] Cloudflare detectado")
-
-        if "akamai" in headers_str:
-            print("[+] Akamai detectado")
-
-        if "sucuri" in headers_str:
-            print("[+] Sucuri WAF detectado")
-
-        # HTTPS check
-        try:
-            requests.get(f"https://{domain}", timeout=5)
-            print("[+] HTTPS disponible")
-        except:
-            print("[-] HTTPS no disponible")
+            for a in soup.find_all("a",href=True)[:10]:
+                print(a['href'])
 
     except:
-        print("[-] Error detección")
-
-# -------------------- RESOLVE --------------------
-def resolve_domain(domain):
-    try:
-        ip = socket.gethostbyname(domain)
-        print(f"\n[+] IP: {ip}")
-        return ip
-    except:
-        print("[-] Error resolviendo dominio")
-        return None
-
-# -------------------- EXPORT --------------------
-def export_data(data):
-    try:
-        with open("resultado_nunx.json", "w") as f:
-            json.dump(data, f, indent=4)
-        print("\n[+] Guardado en resultado_nunx.json")
-    except:
-        print("[-] Error guardando archivo")
+        pass
 
 # -------------------- FULL RECON --------------------
-def full_recon(domain):
-    results = {}
+async def full_recon(domain):
+    print(Fore.YELLOW + f"\n=== {domain} ===")
 
-    ip = resolve_domain(domain)
-    if not ip:
+    async with aiohttp.ClientSession() as session:
+
+        ip = await resolve(domain)
+        if not ip:
+            print("Error dominio")
+            return
+
+        panel(domain, ip)
+
+        tasks = [
+            ip_intel(session, ip),
+            headers(session, domain),
+            port_scan(ip),
+            crtsh(session, domain),
+            emails(session, domain),
+            scraper(session, domain)
+        ]
+
+        results = await asyncio.gather(*tasks)
+
+        await dns_full(domain)
+        whois_lookup(domain)
+
+        report = {
+            "domain": domain,
+            "ip": ip,
+            "intel": results[0],
+            "ports": results[2],
+            "subs": results[3],
+            "emails": results[4]
+        }
+
+        with open(f"{domain}.json","w") as f:
+            json.dump(report, f, indent=4)
+
+        print(Fore.GREEN + "Reporte guardado")
+
+# -------------------- MASS SCAN --------------------
+async def mass_scan():
+    print_section("MASS SCAN")
+
+    try:
+        with open("targets.txt") as f:
+            targets = [t.strip() for t in f if t.strip()]
+    except:
+        print("No targets.txt")
         return
 
-    results["ip"] = ip
-    results["geo"] = geolocation(ip)
-    results["dns"] = dns_lookup(domain)
-    results["reverse"] = reverse_dns(ip)
-    results["ports"] = port_scan(ip)
-    results["subdomains"] = subdomain_lookup(domain)
+    await asyncio.gather(*(full_recon(t) for t in targets))
 
-    detect_tech(domain)
+# -------------------- MAIN --------------------
+def main():
+    print("""
+[1] FULL RECON
+[2] MASS SCAN 🔥
+[3] EXIT
+""")
 
-    export_data(results)
+    op = input(">> ")
 
-# -------------------- IP LOOKUP --------------------
-def ip_lookup():
-    ip = input("\nIP: ")
+    if op == "1":
+        d = input("Dominio: ")
+        asyncio.run(full_recon(d))
 
-    geolocation(ip)
-    reverse_dns(ip)
-    port_scan(ip)
+    elif op == "2":
+        asyncio.run(mass_scan())
 
-# -------------------- MENU --------------------
-def menu():
-    print(BANNER)
-
-    while True:
-        print("""
-[1] Link lookup (FULL RECON)
-[2] IP lookup
-[3] Subdomain lookup
-[4] Exit
-        """)
-
-        choice = input(">> ")
-
-        if choice == "1":
-            domain = input("Dominio: ")
-            full_recon(domain)
-
-        elif choice == "2":
-            ip_lookup()
-
-        elif choice == "3":
-            domain = input("Dominio: ")
-            subdomain_lookup(domain)
-
-        elif choice == "4":
-            print("Bye 👋")
-            sys.exit()
-
-        else:
-            print("Opción inválida")
-
-if __name__ == "__main__":
-    menu()
+main()
